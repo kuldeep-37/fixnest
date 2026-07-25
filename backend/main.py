@@ -1,9 +1,20 @@
-from fastapi import FastAPI, Depends, HTTPException, File, UploadFile
+from fastapi import FastAPI, Depends, HTTPException, Request, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import models, database
 from typing import List
+from fastapi.responses import HTMLResponse
+import asyncio
+from sse_starlette.sse import EventSourceResponse
+
+# Global event queue for SSE
+active_connections = []
+
+def broadcast_event(event_type: str, data: dict):
+    # Convert datetime objects to string in data if needed, simplified for now
+    for queue in active_connections:
+        queue.put_nowait({"event": event_type, "data": json.dumps(data, default=str)})
 
 # Create DB tables
 models.Base.metadata.create_all(bind=database.engine)
@@ -33,7 +44,36 @@ def read_root():
 
 import schemas, ai_triage
 import base64
+import json
 from datetime import datetime, timedelta
+
+@app.post("/verify-upload", response_model=schemas.VerifyUploadResponse)
+def verify_upload(request: schemas.VerifyUploadRequest, db: Session = Depends(get_db)):
+    base64_str = request.photo_base64.split(",")[1] if "," in request.photo_base64 else request.photo_base64
+    match_pct = 0.0
+    try:
+        image_bytes = base64.b64decode(base64_str)
+        match_pct = ai_triage.verify_image_text_match(image_bytes, request.description)
+    except Exception as e:
+        print(f"Verify image error: {e}")
+        
+    duplicate_match_pct = 0.0
+    try:
+        description_embedding = ai_triage.get_embedding(request.description)
+        recent_tickets = db.query(models.Ticket).order_by(models.Ticket.id.desc()).limit(100).all()
+        for t in recent_tickets:
+            if t.embedding:
+                try:
+                    emb2 = json.loads(t.embedding)
+                    sim = ai_triage.compute_similarity(description_embedding, emb2)
+                    if sim > duplicate_match_pct:
+                        duplicate_match_pct = sim
+                except:
+                    pass
+    except Exception as e:
+        print(f"Verify duplicate error: {e}")
+        
+    return {"match_percentage": match_pct, "duplicate_match_pct": round(duplicate_match_pct, 2)}
 
 @app.post("/tickets", response_model=schemas.TicketResponse)
 def create_ticket(ticket: schemas.TicketCreate, db: Session = Depends(get_db)):
@@ -52,6 +92,9 @@ def create_ticket(ticket: schemas.TicketCreate, db: Session = Depends(get_db)):
     db.add(db_ticket)
     db.commit()
     db.refresh(db_ticket)
+    
+    # Broadcast ticket created event
+    broadcast_event("ticket_created", {"id": db_ticket.id})
     
     # Auto-trigger triage
     try:
@@ -88,16 +131,36 @@ def triage_ticket(ticket_id: int, db: Session = Depends(get_db)):
     # Calculate severity
     severity = ai_triage.calculate_severity(ticket.category, ticket.description, confidence)
     
-    # Check duplicates (same category, same community, within 24 hours)
-    time_threshold = datetime.now() - timedelta(hours=24)
-    duplicate_ticket = db.query(models.Ticket).filter(
+    # Calculate new ML metrics
+    gen_pct = ai_triage.calculate_genuineness(ticket.description)
+    cat_pct = ai_triage.calculate_category_match(ticket.category, ticket.description)
+    
+    # Embedding and duplicate match
+    emb = ai_triage.get_embedding(ticket.description)
+    ticket.embedding = json.dumps(emb) if emb else None
+    
+    time_threshold = datetime.now() - timedelta(hours=72)
+    recent_tickets = db.query(models.Ticket).filter(
         models.Ticket.id != ticket.id,
         models.Ticket.community_id == ticket.community_id,
-        models.Ticket.category == ticket.category,
         models.Ticket.created_at >= time_threshold
-    ).first()
+    ).all()
     
-    is_duplicate = duplicate_ticket is not None
+    max_dup_pct = 0.0
+    duplicate_of_id = None
+    
+    if emb:
+        for rt in recent_tickets:
+            if rt.embedding:
+                rt_emb = json.loads(rt.embedding)
+                sim = ai_triage.compute_similarity(emb, rt_emb)
+                if sim > max_dup_pct:
+                    max_dup_pct = sim
+                    duplicate_of_id = rt.id
+                    
+    is_duplicate = max_dup_pct > 85.0
+    
+    classification_label, reason = ai_triage.determine_classification(gen_pct, max_dup_pct)
     
     # Save triage result
     triage = models.AITriageResult(
@@ -106,20 +169,82 @@ def triage_ticket(ticket_id: int, db: Session = Depends(get_db)):
         category_confidence=confidence,
         severity_tier=severity,
         duplicate_flag=is_duplicate,
-        duplicate_of_ticket_id=duplicate_ticket.id if is_duplicate else None,
-        spam_flag=False
+        duplicate_of_ticket_id=duplicate_of_id,
+        duplicate_match_pct=max_dup_pct,
+        genuineness_pct=gen_pct,
+        category_match_pct=cat_pct,
+        spam_flag=(gen_pct < 50.0),
+        classification=classification_label,
+        reason=reason
     )
     db.add(triage)
     
     # Update ticket status
-    ticket.status = "AI Reviewed"
+    ticket.status = "Pending"
     
     # Auto-approval logic
     if severity == "Routine" and confidence > 0.8 and not is_duplicate:
         ticket.status = "Approved"
         
     db.commit()
+    
+    # Broadcast ticket updated event
+    broadcast_event("ticket_updated", {"id": ticket.id, "status": ticket.status})
+    
     return {"status": "success", "triage_id": triage.id}
+
+@app.get("/stream")
+async def stream_events(request: Request):
+    queue = asyncio.Queue()
+    active_connections.append(queue)
+    
+    async def event_generator():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                event = await queue.get()
+                yield event
+        finally:
+            active_connections.remove(queue)
+            
+    return EventSourceResponse(event_generator())
+
+@app.patch("/tickets/{ticket_id}")
+async def update_ticket(ticket_id: int, request: Request, db: Session = Depends(get_db)):
+    ticket = db.query(models.Ticket).filter(models.Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+        
+    body = await request.json()
+    if "status" in body:
+        ticket.status = body["status"]
+    if "priority" in body:
+        ticket.priority = body["priority"]
+    if "assigned_to" in body:
+        ticket.assigned_to = body["assigned_to"]
+        
+    db.commit()
+    broadcast_event("ticket_updated", {"id": ticket.id, "status": ticket.status})
+    return {"status": "success"}
+
+@app.post("/tickets/{ticket_id}/comments", response_model=schemas.CommentResponse)
+def add_comment(ticket_id: int, comment: schemas.CommentCreate, db: Session = Depends(get_db)):
+    ticket = db.query(models.Ticket).filter(models.Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+        
+    db_comment = models.Comment(
+        ticket_id=ticket.id,
+        user_id=comment.user_id,
+        content=comment.content
+    )
+    db.add(db_comment)
+    db.commit()
+    db.refresh(db_comment)
+    
+    broadcast_event("ticket_updated", {"id": ticket.id})
+    return db_comment
 
 @app.get("/admin/tickets", response_model=List[schemas.TicketDetailResponse])
 def get_tickets(db: Session = Depends(get_db)):

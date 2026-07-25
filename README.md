@@ -84,10 +84,23 @@ python -m venv venv
 # macOS/Linux:
 source venv/bin/activate
 
-# Install dependencies
+# Install dependencies (includes scikit-learn, sentence-transformers, kagglehub, FastAPI)
 pip install -r requirements.txt
 
-# Seed the database with mock data
+### 1a. AI Model Training & Initialization
+FixNest uses a locally trained AI model for genuineness classification and keyword taxonomy mapping. Before starting the server, you need to train the model.
+
+Ensure you are in the `backend` directory with the virtual environment activated, then run the training script:
+```bash
+# This will auto-download datasets from Kaggle and train the Logistic Regression model
+python ../scripts/train_genuineness_model.py
+```
+*Note: This script will download three datasets (NYC 311, SMS Spam, Fake Job Postings) via `kagglehub`, train the model, and save `genuineness_model.joblib` and `keyword_taxonomy.json` into `backend/models/`. First-time execution may take a few minutes as it downloads HuggingFace models for SentenceTransformers and CLIP.*
+
+### 1b. Database Setup & Running the Server
+
+```bash
+# Seed the local SQLite database with mock users, vendors, and tickets
 python seed.py
 
 # Run the API server

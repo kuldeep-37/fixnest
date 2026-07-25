@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Buildings, ListChecks, WarningOctagon, MagnifyingGlass, User, ShieldWarning, ShieldCheck, UserPlus, X, SignOut } from "@phosphor-icons/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -12,6 +12,9 @@ export default function AdminDashboard() {
   const [newUserName, setNewUserName] = useState("");
   const [newUserUnit, setNewUserUnit] = useState("");
   const [newUserPassword, setNewUserPassword] = useState("");
+  const [activeTicketId, setActiveTicketId] = useState<number | null>(null);
+  const [isCommentModalOpen, setIsCommentModalOpen] = useState(false);
+  const [commentText, setCommentText] = useState("");
   
   const handleRegisterUser = (e: React.FormEvent) => {
     e.preventDefault();
@@ -23,41 +26,64 @@ export default function AdminDashboard() {
     setNewUserPassword("");
   };
 
-  const [tickets] = useState([
-    {
-      id: "TKT-1042",
-      resident: "Alex (402-B)",
-      category: "Electrical",
-      description: "Spark from the kitchen socket",
-      status: "AI Reviewed",
-      severity: "Critical",
-      aiConfidence: 94,
-      date: "2 mins ago",
-      duplicate: false,
-    },
-    {
-      id: "TKT-1041",
-      resident: "Sarah (112-A)",
-      category: "Plumbing",
-      description: "Tap dripping slightly",
-      status: "Approved",
-      severity: "Routine",
-      aiConfidence: 89,
-      date: "1 hour ago",
-      duplicate: false,
-    },
-    {
-      id: "TKT-1040",
-      resident: "John (305-C)",
-      category: "Cleaning",
-      description: "Lobby floor is dirty",
-      status: "AI Reviewed",
-      severity: "Routine",
-      aiConfidence: 91,
-      date: "2 hours ago",
-      duplicate: true,
+  const [tickets, setTickets] = useState<any[]>([]);
+
+  const fetchTickets = () => {
+    fetch("http://127.0.0.1:8000/admin/tickets")
+      .then(res => res.json())
+      .then(data => setTickets(data))
+      .catch(err => console.error("Error fetching tickets:", err));
+  };
+
+  useEffect(() => {
+    fetchTickets();
+    
+    // Set up SSE connection
+    const eventSource = new EventSource("http://127.0.0.1:8000/stream");
+    
+    eventSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.event === "ticket_created" || data.event === "ticket_updated") {
+          fetchTickets(); // Refresh list on any change
+        }
+      } catch (e) {
+        console.error("SSE parse error", e);
+      }
+    };
+    
+    return () => {
+      eventSource.close();
+    };
+  }, []);
+  
+  const handleUpdateStatus = async (id: number, status: string) => {
+    try {
+      await fetch(`http://127.0.0.1:8000/tickets/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status })
+      });
+    } catch (e) {
+      console.error(e);
     }
-  ]);
+  };
+  
+  const handleAddComment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeTicketId || !commentText.trim()) return;
+    try {
+      await fetch(`http://127.0.0.1:8000/tickets/${activeTicketId}/comments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: 3, content: commentText }) // mock admin user_id
+      });
+      setIsCommentModalOpen(false);
+      setCommentText("");
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-slate-100 flex">
@@ -158,32 +184,49 @@ export default function AdminDashboard() {
                     {tickets.map(ticket => (
                       <tr key={ticket.id} className="hover:bg-slate-50 transition-colors">
                         <td className="py-4 px-6 text-sm font-medium text-slate-900">
-                          {ticket.id}
-                          <p className="text-xs text-slate-400 font-normal mt-1">{ticket.date}</p>
+                          TKT-{ticket.id}
+                          <p className="text-xs text-slate-400 font-normal mt-1">{new Date(ticket.created_at).toLocaleDateString()}</p>
                         </td>
                         <td className="py-4 px-6">
                           <p className="text-sm font-medium text-slate-900">{ticket.category}</p>
                           <p className="text-xs text-slate-500 mt-0.5">{ticket.description}</p>
-                          <p className="text-xs font-medium text-slate-700 mt-1">{ticket.resident}</p>
+                          <p className="text-xs font-medium text-slate-700 mt-1">Unit: {ticket.unit_no || 'Unknown'}</p>
                         </td>
                         <td className="py-4 px-6">
                           <div className="flex flex-col gap-2">
                             <div className="flex items-center gap-2">
                               <span className={`text-xs px-2 py-0.5 rounded font-semibold ${
-                                ticket.severity === 'Critical' ? 'bg-red-100 text-red-700' : 
-                                ticket.severity === 'High' ? 'bg-orange-100 text-orange-700' : 'bg-slate-100 text-slate-700'
+                                ticket.triage_result?.severity_tier === 'Critical' ? 'bg-red-100 text-red-700' : 
+                                ticket.triage_result?.severity_tier === 'High' ? 'bg-orange-100 text-orange-700' : 'bg-slate-100 text-slate-700'
                               }`}>
-                                {ticket.severity}
+                                {ticket.triage_result?.severity_tier || 'Routine'}
                               </span>
                               <span className="text-xs text-slate-500 flex items-center gap-1">
                                 <ShieldCheck size={14} className="text-green-500" />
-                                {ticket.aiConfidence}% match
+                                {Math.round((ticket.triage_result?.category_confidence || 0) * 100)}% match
                               </span>
                             </div>
-                            {ticket.duplicate && (
+                            
+                            {/* Advanced ML Metrics Box */}
+                            <div className="bg-slate-50 border border-slate-200 rounded p-2 text-xs flex flex-col gap-1 mt-1 w-max">
+                               <div className="flex justify-between gap-4">
+                                  <span className="text-slate-500">Genuine:</span>
+                                  <span className={`font-medium ${ticket.triage_result?.genuineness_pct < 50 ? 'text-red-500 font-bold' : 'text-green-600'}`}>{ticket.triage_result?.genuineness_pct ?? '--'}%</span>
+                               </div>
+                               <div className="flex justify-between gap-4">
+                                  <span className="text-slate-500">Keyword Match:</span>
+                                  <span className="font-medium text-slate-700">{ticket.triage_result?.category_match_pct ?? '--'}%</span>
+                               </div>
+                               <div className="flex justify-between gap-4">
+                                  <span className="text-slate-500">Duplicate:</span>
+                                  <span className={`font-medium ${ticket.triage_result?.duplicate_match_pct > 80 ? 'text-amber-600 font-bold' : 'text-slate-700'}`}>{ticket.triage_result?.duplicate_match_pct ?? 0}%</span>
+                               </div>
+                            </div>
+
+                            {ticket.triage_result?.duplicate_flag && (
                               <span className="inline-flex items-center gap-1 text-[10px] uppercase font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded w-max">
                                 <ShieldWarning size={12} />
-                                Possible Duplicate
+                                Duplicate of TKT-{ticket.triage_result?.duplicate_of_ticket_id}
                               </span>
                             )}
                           </div>
@@ -197,14 +240,27 @@ export default function AdminDashboard() {
                           </span>
                         </td>
                         <td className="py-4 px-6 text-right">
-                          {ticket.status === 'AI Reviewed' ? (
-                            <div className="flex justify-end gap-2">
-                              <button className="px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-300 rounded hover:bg-slate-50">Reject</button>
-                              <button className="px-3 py-1.5 text-xs font-medium text-white bg-primary-600 rounded hover:bg-primary-700">Approve & Route</button>
-                            </div>
-                          ) : (
-                            <button className="text-sm font-medium text-primary-600 hover:text-primary-700">View Details</button>
-                          )}
+                          <div className="flex flex-col gap-2 items-end">
+                            {ticket.status === 'Pending' ? (
+                              <div className="flex gap-2">
+                                <button onClick={() => handleUpdateStatus(ticket.id, 'Invalid')} className="px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-300 rounded hover:bg-slate-50">Reject</button>
+                                <button onClick={() => handleUpdateStatus(ticket.id, 'Approved')} className="px-3 py-1.5 text-xs font-medium text-white bg-primary-600 rounded hover:bg-primary-700">Approve</button>
+                              </div>
+                            ) : ticket.status === 'Approved' ? (
+                              <div className="flex gap-2">
+                                <button onClick={() => handleUpdateStatus(ticket.id, 'In Progress')} className="px-3 py-1.5 text-xs font-medium text-white bg-amber-600 rounded hover:bg-amber-700">Assign Vendor</button>
+                                <button onClick={() => handleUpdateStatus(ticket.id, 'Closed')} className="px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-300 rounded hover:bg-slate-50">Close</button>
+                              </div>
+                            ) : (
+                              <button onClick={() => handleUpdateStatus(ticket.id, 'Closed')} className="px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-300 rounded hover:bg-slate-50">Close</button>
+                            )}
+                            <button 
+                              onClick={() => { setActiveTicketId(ticket.id); setIsCommentModalOpen(true); }}
+                              className="text-xs font-medium text-primary-600 hover:text-primary-700"
+                            >
+                              Add Comment
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -258,6 +314,36 @@ export default function AdminDashboard() {
               <div className="pt-4 flex justify-end gap-3">
                 <button type="button" onClick={() => setIsRegisterModalOpen(false)} className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">Cancel</button>
                 <button type="submit" className="px-4 py-2 text-sm font-medium text-white bg-primary-600 hover:bg-primary-700 rounded-lg transition-colors shadow-sm">Register User</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Comment Modal */}
+      {isCommentModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex justify-center items-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl overflow-hidden">
+            <div className="flex justify-between items-center p-5 border-b border-slate-200">
+              <h3 className="text-lg font-bold text-slate-900">Add Admin Comment</h3>
+              <button onClick={() => setIsCommentModalOpen(false)} className="text-slate-400 hover:text-slate-600">
+                <X size={20} weight="bold" />
+              </button>
+            </div>
+            <form onSubmit={handleAddComment} className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Comment</label>
+                <textarea 
+                  required 
+                  value={commentText} 
+                  onChange={e => setCommentText(e.target.value)} 
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 min-h-[100px]" 
+                  placeholder="Enter a public update for the resident..." 
+                />
+              </div>
+              <div className="pt-4 flex justify-end gap-3">
+                <button type="button" onClick={() => setIsCommentModalOpen(false)} className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">Cancel</button>
+                <button type="submit" className="px-4 py-2 text-sm font-medium text-white bg-primary-600 hover:bg-primary-700 rounded-lg transition-colors shadow-sm">Post Comment</button>
               </div>
             </form>
           </div>

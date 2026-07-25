@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef } from "react";
-import { Camera, MapPin, CaretLeft, Lightning, Drop, Broom, DotsThree } from "@phosphor-icons/react";
+import { Camera, MapPin, CaretLeft, Lightning, Drop, Broom, DotsThree, WarningCircle } from "@phosphor-icons/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
@@ -19,6 +19,10 @@ export default function NewTicket() {
   const [geoTag, setGeoTag] = useState<{lat: number, lng: number} | null>(null);
   const [geoLoading, setGeoLoading] = useState(false);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+  const [photoBase64, setPhotoBase64] = useState<string | null>(null);
+  const [matchPct, setMatchPct] = useState<number | null>(null);
+  const [duplicatePct, setDuplicatePct] = useState<number | null>(null);
+  const [isVerifying, setIsVerifying] = useState(false);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -48,6 +52,14 @@ export default function NewTicket() {
       const url = URL.createObjectURL(file);
       setPhotoPreview(url);
       
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const b64 = reader.result as string;
+        setPhotoBase64(b64);
+        verifyMatch(b64, description);
+      };
+      reader.readAsDataURL(file);
+      
       // Auto-capture geo on photo upload if not already captured
       if (!geoTag) {
         handleCaptureGeo();
@@ -55,24 +67,81 @@ export default function NewTicket() {
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleDescriptionChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const text = e.target.value;
+    setDescription(text);
+    if (photoBase64 && text.length > 5) {
+      verifyMatch(photoBase64, text);
+    }
+  };
+
+  const verifyMatch = async (b64: string, text: string) => {
+    if (!b64 || !text || text.length < 5) return;
+    setIsVerifying(true);
+    try {
+      const res = await fetch("http://127.0.0.1:8000/verify-upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ photo_base64: b64, description: text })
+      });
+      const data = await res.json();
+      setMatchPct(data.match_percentage);
+      setDuplicatePct(data.duplicate_match_pct);
+    } catch (err) {
+      console.error("Verification failed", err);
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedCategory || !photoPreview) {
-      alert("Please select a category and upload a photo.");
+    if (!selectedCategory || !photoPreview || !description.trim()) {
+      alert("Please fill all mandatory fields.");
       return;
     }
-    // Implement API call here
-    console.log({ selectedCategory, description, geoTag });
-    router.push("/resident");
+    
+    try {
+      const res = await fetch("http://127.0.0.1:8000/tickets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          resident_id: 1, // Mock resident ID
+          community_id: 1, // Mock community ID
+          category: categories.find(c => c.id === selectedCategory)?.name || "Other",
+          description: description,
+          photo_base64: photoBase64,
+          intake_lat: geoTag?.lat,
+          intake_lng: geoTag?.lng,
+          unit_no: "402-B" // Mock unit
+        })
+      });
+      
+      if (res.ok) {
+        alert("Ticket submitted successfully!");
+        router.push("/resident");
+      } else {
+        alert("Failed to submit ticket.");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("An error occurred.");
+    }
   };
 
   return (
     <div className="max-w-md mx-auto min-h-screen bg-slate-50 flex flex-col">
-      <header className="px-4 py-4 sticky top-0 bg-slate-50/80 backdrop-blur-md z-10 flex items-center gap-4">
-        <Link href="/resident" className="w-10 h-10 rounded-full bg-white shadow-sm flex items-center justify-center text-slate-700 hover:bg-slate-100">
-          <CaretLeft weight="bold" size={20} />
-        </Link>
-        <h1 className="text-lg font-bold text-slate-900">Raise Ticket</h1>
+      <header className="px-4 py-4 sticky top-0 bg-slate-50/80 backdrop-blur-md z-10 flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <Link href="/resident" className="w-10 h-10 rounded-full bg-white shadow-sm flex items-center justify-center text-slate-700 hover:bg-slate-100">
+            <CaretLeft weight="bold" size={20} />
+          </Link>
+          <h1 className="text-lg font-bold text-slate-900">Raise Ticket</h1>
+        </div>
+        <div className="bg-slate-100 text-slate-700 px-3 py-1.5 rounded-md text-xs font-bold border border-slate-200 shadow-inner flex items-center gap-2">
+          <span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>
+          ID: HSR-402B
+        </div>
       </header>
 
       <main className="flex-1 px-4 pb-24">
@@ -166,13 +235,50 @@ export default function NewTicket() {
 
           {/* Description */}
           <section>
-            <label className="block text-sm font-semibold text-slate-700 mb-3">Additional details (Optional)</label>
+            <label className="block text-sm font-semibold text-slate-700 mb-3">Description <span className="text-red-500">*</span></label>
             <textarea
+              required
               value={description}
-              onChange={(e) => setDescription(e.target.value)}
+              onChange={handleDescriptionChange}
               placeholder="e.g. The tap has been leaking since yesterday..."
               className="w-full p-4 rounded-xl border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent resize-none h-24 text-sm"
             ></textarea>
+            
+            {/* AI Verification Match */}
+            {(photoBase64 && description.length > 5) && (
+              <div className="mt-3 flex flex-col gap-2">
+                <div className={`p-3 rounded-lg border flex justify-between items-center ${matchPct && matchPct > 50 ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200'}`}>
+                  <div className="flex items-center gap-2">
+                    <Lightning weight="fill" className={matchPct && matchPct > 50 ? "text-green-500" : "text-amber-500"} />
+                    <span className="text-xs font-medium text-slate-700">AI Photo & Text Match</span>
+                  </div>
+                  {isVerifying ? (
+                    <span className="text-xs font-semibold text-slate-500 animate-pulse">Analyzing...</span>
+                  ) : (
+                    <span className={`text-sm font-bold ${matchPct && matchPct > 50 ? "text-green-700" : "text-amber-700"}`}>
+                      {matchPct ?? 0}%
+                    </span>
+                  )}
+                </div>
+                
+                <div className={`p-3 rounded-lg border flex justify-between items-center ${duplicatePct && duplicatePct > 80 ? 'bg-red-50 border-red-200' : 'bg-slate-50 border-slate-200'}`}>
+                  <div className="flex items-center gap-2">
+                    <WarningCircle weight="fill" className={duplicatePct && duplicatePct > 80 ? "text-red-500" : "text-slate-500"} />
+                    <span className="text-xs font-medium text-slate-700">Problem Match with Existing Tickets</span>
+                  </div>
+                  {isVerifying ? (
+                    <span className="text-xs font-semibold text-slate-500 animate-pulse">Analyzing...</span>
+                  ) : (
+                    <span className={`text-sm font-bold ${duplicatePct && duplicatePct > 80 ? "text-red-700" : "text-slate-700"}`}>
+                      {duplicatePct ?? 0}%
+                    </span>
+                  )}
+                </div>
+                {duplicatePct && duplicatePct > 80 && (
+                  <p className="text-[10px] text-red-600 font-medium px-1">Warning: A very similar problem was recently reported in this community.</p>
+                )}
+              </div>
+            )}
           </section>
 
         </form>
@@ -182,7 +288,7 @@ export default function NewTicket() {
       <div className="fixed bottom-0 left-0 right-0 p-4 bg-white border-t border-slate-200 max-w-md mx-auto pb-8">
         <button
           onClick={handleSubmit}
-          disabled={!selectedCategory || !photoPreview || !geoTag}
+          disabled={!selectedCategory || !photoPreview || !geoTag || !description.trim()}
           className="w-full py-3.5 bg-primary-600 text-white rounded-xl font-semibold shadow-lg shadow-primary-600/20 disabled:opacity-50 disabled:shadow-none transition-all active:scale-[0.98]"
         >
           Submit Ticket

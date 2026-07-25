@@ -17,7 +17,14 @@ type Ticket = {
   created_at: string;
   triage_result?: {
     severity_tier: string;
+    classification: string;
+    reason: string;
   };
+  comments?: {
+    id: number;
+    content: string;
+    created_at: string;
+  }[];
 };
 
 export default function ResidentDashboard() {
@@ -54,6 +61,24 @@ export default function ResidentDashboard() {
 
   useEffect(() => {
     fetchTickets();
+    
+    // Set up SSE connection
+    const eventSource = new EventSource("http://127.0.0.1:8000/stream");
+    
+    eventSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.event === "ticket_created" || data.event === "ticket_updated") {
+          fetchTickets(); // Refresh list on any change
+        }
+      } catch (e) {
+        console.error("SSE parse error", e);
+      }
+    };
+    
+    return () => {
+      eventSource.close();
+    };
   }, []);
 
   const handleOpenFeedback = (ticketId: number) => {
@@ -141,13 +166,19 @@ export default function ResidentDashboard() {
           <h2 className="text-xl font-semibold text-slate-800 capitalize">
             {activeTab === "tickets" ? "My Requests" : activeTab}
           </h2>
-          <Link 
-            href="/resident/new"
-            className="flex items-center gap-2 bg-primary-600 text-white font-medium px-4 py-2 rounded-lg text-sm hover:bg-primary-700 transition-colors shadow-sm"
-          >
-            <Plus weight="bold" />
-            Raise Ticket
-          </Link>
+          <div className="flex items-center gap-4">
+            <div className="bg-slate-100 text-slate-700 px-3 py-1.5 rounded-md text-sm font-bold border border-slate-200 shadow-inner flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-green-500"></span>
+              ID: HSR-402B
+            </div>
+            <Link 
+              href="/resident/new"
+              className="flex items-center gap-2 bg-primary-600 text-white font-medium px-4 py-2 rounded-lg text-sm hover:bg-primary-700 transition-colors shadow-sm"
+            >
+              <Plus weight="bold" />
+              Raise Ticket
+            </Link>
+          </div>
         </header>
 
         <div className="flex-1 p-8 overflow-auto">
@@ -229,13 +260,43 @@ export default function ResidentDashboard() {
                                   }`}>
                                     {ticket.status}
                                   </span>
+                                  {ticket.triage_result?.classification && (
+                                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full ${
+                                      ticket.triage_result.classification === 'Genuine' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+                                      ticket.triage_result.classification === 'Duplicate' ? 'bg-amber-50 text-amber-700 border border-amber-200' :
+                                      'bg-red-50 text-red-700 border border-red-200'
+                                    }`}>
+                                      AI: {ticket.triage_result.classification}
+                                    </span>
+                                  )}
                                 </div>
-                                <p className="text-sm text-slate-600 mt-1">{ticket.description}</p>
-                                <div className="flex items-center gap-3 text-xs font-medium text-slate-500 mt-2">
-                                  <span>Reported: {new Date(ticket.created_at).toLocaleDateString()}</span>
-                                  <span className="w-1 h-1 rounded-full bg-slate-300"></span>
-                                  <span className={severity === 'Critical' ? 'text-red-600' : ''}>{severity} Priority</span>
-                                </div>
+                                <p className="text-sm text-slate-500 mt-1 line-clamp-2">{ticket.description}</p>
+                                
+                                {ticket.triage_result?.reason && (
+                                  <div className="mt-2 bg-slate-50 p-2 rounded border border-slate-200 flex items-start gap-2">
+                                    <Info size={16} className="text-blue-500 mt-0.5 shrink-0" />
+                                    <p className="text-xs text-slate-600">{ticket.triage_result.reason}</p>
+                                  </div>
+                                )}
+                                
+                                {ticket.comments && ticket.comments.length > 0 && (
+                                  <div className="mt-3 space-y-2">
+                                    <p className="text-xs font-bold text-slate-700">Admin Comments:</p>
+                                    {ticket.comments.map(c => (
+                                      <div key={c.id} className="bg-blue-50/50 p-2 rounded border border-blue-100 text-sm text-slate-700">
+                                        "{c.content}"
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                            
+                            <div className="text-right flex flex-col items-end">
+                              <div className="flex items-center gap-3 text-xs font-medium text-slate-500 mt-2">
+                                <span>Reported: {new Date(ticket.created_at).toLocaleDateString()}</span>
+                                <span className="w-1 h-1 rounded-full bg-slate-300"></span>
+                                <span className={severity === 'Critical' ? 'text-red-600' : ''}>{severity} Priority</span>
                               </div>
                             </div>
                           </div>

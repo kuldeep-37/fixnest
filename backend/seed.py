@@ -30,8 +30,8 @@ def seed_db():
     db.commit()
     
     print("Seeding users...")
-    u1 = models.User(name="Alex", unit_no="402-B", community_id=c1.id, phone="9876543210")
-    u2 = models.User(name="Sarah", unit_no="112-A", community_id=c1.id, phone="9876543211")
+    u1 = models.User(name="Rajesh Sharma", unit_no="402-B", community_id=c1.id, phone="9876543210")
+    u2 = models.User(name="Priya Iyer", unit_no="112-A", community_id=c1.id, phone="9876543211")
     admin = models.User(name="Admin", community_id=c1.id, role="admin")
     db.add_all([u1, u2, admin])
     db.commit()

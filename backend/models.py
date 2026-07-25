@@ -43,13 +43,18 @@ class Ticket(Base):
     intake_lat = Column(Float, nullable=True)
     intake_lng = Column(Float, nullable=True)
     unit_no = Column(String)
-    status = Column(String, default="Submitted") # Submitted, AI Reviewed, Approved, Assigned, In Progress, Completed, Closed, Reopened
+    priority = Column(String, default="Normal") # Normal, High, Critical
+    assigned_to = Column(Integer, ForeignKey("users.id"), nullable=True)
+    status = Column(String, default="Pending") # Pending, Assigned, In Progress, Completed, Closed, Reopened
+    embedding = Column(String, nullable=True) # JSON string of embedding floats
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     # Relationships
-    triage_result = relationship("AITriageResult", back_populates="ticket", uselist=False)
+    triage_result = relationship("AITriageResult", back_populates="ticket", uselist=False, foreign_keys="[AITriageResult.ticket_id]")
     assignment = relationship("Assignment", back_populates="ticket", uselist=False)
     job_completion = relationship("JobCompletion", back_populates="ticket", uselist=False)
+    comments = relationship("Comment", back_populates="ticket")
+    assignee = relationship("User", foreign_keys=[assigned_to])
 
 class AITriageResult(Base):
     __tablename__ = "ai_triage_results"
@@ -57,12 +62,33 @@ class AITriageResult(Base):
     ticket_id = Column(Integer, ForeignKey("tickets.id"))
     predicted_category = Column(String)
     category_confidence = Column(Float)
-    severity_tier = Column(String) # Critical, High, Routine
+    severity_tier = Column(String)
     duplicate_flag = Column(Boolean, default=False)
-    duplicate_of_ticket_id = Column(Integer, nullable=True)
+    duplicate_of_ticket_id = Column(Integer, ForeignKey("tickets.id"), nullable=True)
+    
+    # AI New Requirements
+    classification = Column(String, nullable=True) # Genuine, Duplicate, Invalid
+    reason = Column(String, nullable=True)
+    
+    # Advanced AI fields
+    duplicate_match_pct = Column(Float, default=0.0)
+    genuineness_pct = Column(Float, default=100.0)
+    category_match_pct = Column(Float, default=0.0)
     spam_flag = Column(Boolean, default=False)
     
-    ticket = relationship("Ticket", back_populates="triage_result")
+    # Relationships
+    ticket = relationship("Ticket", back_populates="triage_result", foreign_keys=[ticket_id])
+
+class Comment(Base):
+    __tablename__ = "comments"
+    id = Column(Integer, primary_key=True, index=True)
+    ticket_id = Column(Integer, ForeignKey("tickets.id"))
+    user_id = Column(Integer, ForeignKey("users.id"))
+    content = Column(String)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    ticket = relationship("Ticket", back_populates="comments")
+    author = relationship("User")
 
 class Assignment(Base):
     __tablename__ = "assignments"
